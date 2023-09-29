@@ -1,0 +1,4 @@
+github.com/cuu/grab v2.0.0+incompatible h1:iXzIujTt9fYkjw63Tlxyxw1ohvabE59jWgkzI4LUY6E=
+github.com/cuu/grab v2.0.0+incompatible/go.mod h1:FQIc8xU5/Uw5lfVeVv4hrrclKgc+6c0ALOYVaTS+R20=
+golang.org/x/net v0.15.0 h1:ugBLEUaxABaB5AJqW9enI0ACdci2RUd4eP51NTBvuJ8=
+golang.org/x/net v0.15.0/go.mod h1:idbUs1IY1+zTqbi8yxTbhexhEEk5ur9LInksu6HrEpk=
