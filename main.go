@@ -76,6 +76,7 @@ func parseArgs() {
 
 	if urlString == "" {
 		fmt.Println("URL can't be empty")
+		printUsage()
 		os.Exit(1)
 	}
 
@@ -84,7 +85,16 @@ func parseArgs() {
 	}
 
 	if maxDepth <= 0 {
-		fmt.Println("max depth should be 0 or above")
+		fmt.Println("max depth should be above 0")
+		printUsage()
 		os.Exit(1)
 	}
+}
+
+func printUsage() {
+	fmt.Println("Usage:")
+	fmt.Println("  main -url <URL> [-depth <depth>]")
+	fmt.Println()
+	fmt.Println("Flags:")
+	flag.PrintDefaults()
 }
