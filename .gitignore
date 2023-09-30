@@ -1,1 +1,4 @@
 .idea/
+https*
+crawler_state.txt
+webCrawlerLog.txt

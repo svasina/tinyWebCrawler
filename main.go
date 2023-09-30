@@ -44,23 +44,20 @@ func main() {
 		*stateFileExistsPtr = true
 	}
 
-	log.Println(visitedURLs)
-
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
 		newURL := buildValidURL(urlString, link)
-		if link != "" && !hasBeenVisited(newURL) {
-			e.Request.Visit(newURL)
+		if link != "" && !visitedURLs[newURL] {
 			visitedURLs[newURL] = true
+			e.Request.Visit(newURL)
 		}
 	})
+
 	c.OnRequest(func(r *colly.Request) {
 		fmt.Println("Visiting", r.URL.String())
 	})
 
 	c.OnResponse(func(r *colly.Response) {
-		log.Printf("resp")
-
 		contentType := r.Headers.Get("Content-Type")
 		if strings.HasPrefix(contentType, "text/html") ||
 			strings.HasPrefix(contentType, "application/javascript") ||
@@ -70,18 +67,13 @@ func main() {
 			if isSameDomain(r.Request.URL.String()) {
 				dirName := setupDir(urlString)
 				fileName := path.Join(dirName, path.Base(r.Request.URL.String()))
-
-				if !hasBeenVisited(r.Request.URL.String()) {
-					log.Printf("no visits")
-					if !hasBeenDownloaded(r.Request.URL.String()) {
-						log.Printf("no downloads")
-						err := downloadFile(urlString, dirName, fileName)
-						if err != nil {
-							log.Printf("ERROR: Error saving file %s: %v", fileName, err)
-						} else {
-							log.Printf("INFO: Downloaded file %s", fileName)
-							markAsDownloaded(r.Request.URL.String())
-						}
+				if !hasBeenDownloaded(r.Request.URL.String()) {
+					err := downloadFile(urlString, dirName, fileName)
+					if err != nil {
+						log.Printf("INFO: Error saving file %s: %v", fileName, err)
+					} else {
+						log.Printf("INFO: Downloaded file %s", fileName)
+						markAsDownloaded(r.Request.URL.String())
 					}
 				}
 			}
@@ -203,6 +195,7 @@ func isSameDomain(checkURL string) bool {
 
 // Load previously downloaded URLs from the state file
 func loadStateFromFile(stateFileName string) {
+	log.Printf("check state")
 	file, err := os.Open(stateFileName)
 	if err != nil {
 		log.Println("INFO: State file not found, starting from scratch")
@@ -213,7 +206,7 @@ func loadStateFromFile(stateFileName string) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		urlString = scanner.Text()
-		//visitedURLs[urlString] = true
+		visitedURLs[urlString] = true
 	}
 
 	if err = scanner.Err(); err != nil {
@@ -221,7 +214,14 @@ func loadStateFromFile(stateFileName string) {
 	}
 }
 
-func updateStateFile(urlStr string) {
+func hasBeenDownloaded(urlStr string) bool {
+	if *stateFileExistsPtr {
+		return checkStateFile(urlStr)
+	}
+	return false
+}
+
+func markAsDownloaded(urlStr string) {
 	file, err := os.OpenFile(stateFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Printf("ERROR: Failed to open state file %s for writing: %v", stateFileName, err)
@@ -235,31 +235,10 @@ func updateStateFile(urlStr string) {
 	}
 }
 
-func hasBeenVisited(urlStr string) bool {
-	_, ok := visitedURLs[urlStr]
-	log.Printf("ok %v for url %v", ok, urlStr)
-	return ok
-}
-
-func hasBeenDownloaded(urlStr string) bool {
-	if *stateFileExistsPtr {
-		log.Printf("check state")
-		return checkStateFile(urlStr)
-	}
-	log.Printf("there is no file ")
-	return false
-}
-
-func markAsDownloaded(urlStr string) {
-	visitedURLs[urlStr] = true
-	updateStateFile(urlStr)
-}
-
 func checkStateFile(urlStr string) bool {
 	file, err := os.Open(stateFileName)
 	if err != nil {
 		log.Printf("ERROR: Failed to open state file for reading: %v", err)
-		log.Printf("downloaded false1")
 		return false
 	}
 	defer file.Close()
@@ -268,7 +247,6 @@ func checkStateFile(urlStr string) bool {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == urlStr {
-			log.Printf("downloaded true")
 			return true
 		}
 	}
@@ -276,6 +254,5 @@ func checkStateFile(urlStr string) bool {
 	if err = scanner.Err(); err != nil {
 		log.Printf("ERROR: Failed to read from state file: %v", err)
 	}
-	log.Printf("downloaded false2")
 	return false
 }
