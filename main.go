@@ -1,16 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
-	"github.com/cuu/grab"
-	"github.com/gocolly/colly"
 	"io"
 	"log"
-	"net/url"
 	"os"
-	"path"
+	"regexp"
 	"strings"
 )
 
@@ -26,88 +22,41 @@ var stateFileExists = false
 var stateFileExistsPtr = &stateFileExists
 var stateFileName = "crawler_state.txt"
 
-func main() {
-	ParseArgs()
-
-	if err := SetupLogging(); err != nil {
-		fmt.Printf("ERROR: %v", err)
-	}
-
-	log.Printf("INFO: Starting the crawler for %s...", urlString)
-
-	c := colly.NewCollector(
-		colly.MaxDepth(maxDepth),
-	)
-
-	if _, err := os.Stat(stateFileName); err == nil {
-		loadStateFromFile(stateFileName)
-		*stateFileExistsPtr = true
-	}
-
-	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		link := e.Attr("href")
-		newURL := buildValidURL(urlString, link)
-		if link != "" && !visitedURLs[newURL] {
-			visitedURLs[newURL] = true
-			e.Request.Visit(newURL)
-		}
-	})
-
-	c.OnRequest(func(r *colly.Request) {
-		fmt.Println("Visiting", r.URL.String())
-	})
-
-	c.OnResponse(func(r *colly.Response) {
-		contentType := r.Headers.Get("Content-Type")
-		if strings.HasPrefix(contentType, "text/html") ||
-			strings.HasPrefix(contentType, "application/javascript") ||
-			strings.HasPrefix(contentType, "text/css") {
-
-			// Check if the response URL belongs to the same domain
-			if isSameDomain(r.Request.URL.String()) {
-				dirName := setupDir(urlString)
-				fileName := path.Join(dirName, path.Base(r.Request.URL.String()))
-				if !hasBeenDownloaded(r.Request.URL.String()) {
-					err := downloadFile(urlString, dirName, fileName)
-					if err != nil {
-						log.Printf("INFO: Error saving file %s: %v", fileName, err)
-					} else {
-						log.Printf("INFO: Downloaded file %s", fileName)
-						markAsDownloaded(r.Request.URL.String())
-					}
-				}
-			}
-		}
-	})
-
-	err := c.Visit(urlString)
-	if err != nil {
-		log.Fatalf("INFO: Mission failed, check logs. Msg: %v", err)
-	}
-
-	log.Println("INFO: Hooray! Mission completed")
-	os.Exit(0)
-}
-
-// Create a dir to save web pages
-func setupDir(urlString string) string {
-	dirName := setupDirNameFormat(urlString)
-	err := os.MkdirAll(dirName, os.ModePerm)
+var dirName = func() string {
+	tmpName := setupDirNameFormat()
+	err := os.MkdirAll(tmpName, os.ModePerm)
 	if err != nil {
 		log.Fatalf("ERROR: Couldn't create a directory, msg: %v", err)
 	}
 
-	return dirName
+	return tmpName
 }
 
-func setupDirNameFormat(urlStr string) string {
-	dirName := strings.Replace(urlStr, "://", "_", -1)
-	dirName = strings.Replace(dirName, "/", "_", -1)
-	dirName = strings.Replace(dirName, ".", "_", -1)
-	return dirName
+func main() {
+	parseArgs()
+
+	if err := setupLogging(); err != nil {
+		fmt.Printf("ERROR: %v", err)
+		os.Exit(1)
+	}
+
+	log.Printf("INFO: Starting the crawler for %s...", urlString)
+
+	if _, err := os.Stat(stateFileName); err == nil {
+		LoadStateFromFile(stateFileName)
+		*stateFileExistsPtr = true
+	}
+
+	Crawl()
 }
 
-func SetupLogging() error {
+func setupDirNameFormat() string {
+	re := regexp.MustCompile(`[:/.]`)
+	nameFormat := re.ReplaceAllString(urlString, "_")
+	return nameFormat
+}
+
+func setupLogging() error {
 	// save logs to file
 	logFile, err := os.OpenFile("webCrawlerLog.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
@@ -119,7 +68,7 @@ func SetupLogging() error {
 	return nil
 }
 
-func ParseArgs() {
+func parseArgs() {
 	log.Println("INFO: Parsing args...")
 	flag.StringVar(&urlString, "url", "", "URL to start crawling")
 	flag.IntVar(&maxDepth, "depth", defaultDepth, "Maximum depth of crawling")
@@ -138,121 +87,4 @@ func ParseArgs() {
 		fmt.Println("max depth should be 0 or above")
 		os.Exit(1)
 	}
-}
-
-func downloadFile(urlString, dirName, fileName string) error {
-	req, err := grab.NewRequest(dirName, urlString)
-	if err != nil {
-		return err
-	}
-
-	req.Filename = fileName // Set the filename
-
-	client := grab.NewClient()
-	resp := client.Do(req)
-
-	// Wait for the download to complete
-	<-resp.Done
-
-	if resp.Err() != nil {
-		return resp.Err()
-	}
-
-	return nil
-}
-
-func buildValidURL(hostname string, link string) string {
-	if link == "" {
-		return ""
-	}
-
-	// check if url already absolute, if yes return it straight away
-	parsedURL, err := url.Parse(link)
-	if err == nil && parsedURL.IsAbs() {
-		return link
-	}
-
-	// otherwise join the hostname and the link
-	u, err := url.Parse(hostname)
-	if err != nil {
-		return ""
-	}
-	u.Path = path.Join(u.Path, link)
-
-	return u.String()
-}
-
-// Function to check if two URLs belong to the same domain
-func isSameDomain(checkURL string) bool {
-	u1, err1 := url.Parse(urlString)
-	u2, err2 := url.Parse(checkURL)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-
-	return u1.Hostname() == u2.Hostname()
-}
-
-// Load previously downloaded URLs from the state file
-func loadStateFromFile(stateFileName string) {
-	log.Printf("check state")
-	file, err := os.Open(stateFileName)
-	if err != nil {
-		log.Println("INFO: State file not found, starting from scratch")
-		return
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		urlString = scanner.Text()
-		visitedURLs[urlString] = true
-	}
-
-	if err = scanner.Err(); err != nil {
-		log.Printf("ERROR: Failed to read state file: %v", err)
-	}
-}
-
-func hasBeenDownloaded(urlStr string) bool {
-	if *stateFileExistsPtr {
-		return checkStateFile(urlStr)
-	}
-	return false
-}
-
-func markAsDownloaded(urlStr string) {
-	file, err := os.OpenFile(stateFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Printf("ERROR: Failed to open state file %s for writing: %v", stateFileName, err)
-		return
-	}
-	defer file.Close()
-
-	_, err = file.WriteString(urlStr + "\n")
-	if err != nil {
-		log.Printf("ERROR: Failed to write to state file %s: %v", stateFileName, err)
-	}
-}
-
-func checkStateFile(urlStr string) bool {
-	file, err := os.Open(stateFileName)
-	if err != nil {
-		log.Printf("ERROR: Failed to open state file for reading: %v", err)
-		return false
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == urlStr {
-			return true
-		}
-	}
-
-	if err = scanner.Err(); err != nil {
-		log.Printf("ERROR: Failed to read from state file: %v", err)
-	}
-	return false
 }
