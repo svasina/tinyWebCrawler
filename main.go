@@ -1,31 +1,30 @@
 package main
 
 import (
-	"bytes"
-	"crypto/tls"
-	"errors"
+	"bufio"
 	"flag"
 	"fmt"
 	"github.com/cuu/grab"
-	"golang.org/x/net/html"
+	"github.com/gocolly/colly"
 	"io"
 	"log"
-	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"strings"
-	"time"
 )
 
-const defaultDepth = 3
+const defaultDepth = 2
 
 var (
-	urlString string // url should be set without https://
+	urlString string
 	maxDepth  int
 )
 
 var visitedURLs = make(map[string]bool)
+var stateFileExists = false
+var stateFileExistsPtr = &stateFileExists
+var stateFileName = "crawler_state.txt"
 
 func main() {
 	ParseArgs()
@@ -36,10 +35,61 @@ func main() {
 
 	log.Printf("INFO: Starting the crawler for %s...", urlString)
 
-	newClient := InitHTTPClient()
-	dirName := setupDir(urlString)
+	c := colly.NewCollector(
+		colly.MaxDepth(maxDepth),
+	)
 
-	if err := Crawler(urlString, dirName, &newClient, 0); err != nil {
+	if _, err := os.Stat(stateFileName); err == nil {
+		loadStateFromFile(stateFileName)
+		*stateFileExistsPtr = true
+	}
+
+	log.Println(visitedURLs)
+
+	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
+		link := e.Attr("href")
+		newURL := buildValidURL(urlString, link)
+		if link != "" && !hasBeenVisited(newURL) {
+			e.Request.Visit(newURL)
+			visitedURLs[newURL] = true
+		}
+	})
+	c.OnRequest(func(r *colly.Request) {
+		fmt.Println("Visiting", r.URL.String())
+	})
+
+	c.OnResponse(func(r *colly.Response) {
+		log.Printf("resp")
+
+		contentType := r.Headers.Get("Content-Type")
+		if strings.HasPrefix(contentType, "text/html") ||
+			strings.HasPrefix(contentType, "application/javascript") ||
+			strings.HasPrefix(contentType, "text/css") {
+
+			// Check if the response URL belongs to the same domain
+			if isSameDomain(r.Request.URL.String()) {
+				dirName := setupDir(urlString)
+				fileName := path.Join(dirName, path.Base(r.Request.URL.String()))
+
+				if !hasBeenVisited(r.Request.URL.String()) {
+					log.Printf("no visits")
+					if !hasBeenDownloaded(r.Request.URL.String()) {
+						log.Printf("no downloads")
+						err := downloadFile(urlString, dirName, fileName)
+						if err != nil {
+							log.Printf("ERROR: Error saving file %s: %v", fileName, err)
+						} else {
+							log.Printf("INFO: Downloaded file %s", fileName)
+							markAsDownloaded(r.Request.URL.String())
+						}
+					}
+				}
+			}
+		}
+	})
+
+	err := c.Visit(urlString)
+	if err != nil {
 		log.Fatalf("INFO: Mission failed, check logs. Msg: %v", err)
 	}
 
@@ -49,11 +99,19 @@ func main() {
 
 // Create a dir to save web pages
 func setupDir(urlString string) string {
-	dirName := setupFileName(urlString)
+	dirName := setupDirNameFormat(urlString)
 	err := os.MkdirAll(dirName, os.ModePerm)
 	if err != nil {
 		log.Fatalf("ERROR: Couldn't create a directory, msg: %v", err)
 	}
+
+	return dirName
+}
+
+func setupDirNameFormat(urlStr string) string {
+	dirName := strings.Replace(urlStr, "://", "_", -1)
+	dirName = strings.Replace(dirName, "/", "_", -1)
+	dirName = strings.Replace(dirName, ".", "_", -1)
 	return dirName
 }
 
@@ -90,131 +148,25 @@ func ParseArgs() {
 	}
 }
 
-func InitHTTPClient() http.Client {
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-	}
-	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
-
-	return http.Client{
-		Timeout:   20 * time.Second,
-		Transport: transport,
-	}
-}
-
-func Crawler(urlString, dirName string, client *http.Client, currentDepth int) error {
-	if currentDepth > maxDepth {
-		log.Printf("INFO: Stopping crawling, max depth reached (depth %d)...", maxDepth)
-		return nil
-	}
-
-	visitedURLs[urlString] = true
-
-	body, err := ConnectToURL(urlString, client)
+func downloadFile(urlString, dirName, fileName string) error {
+	req, err := grab.NewRequest(dirName, urlString)
 	if err != nil {
 		return err
 	}
 
-	// Check if the URL ends with a known file extension
-	if shouldDownload(urlString) {
-		// Download the file using grab
-		err = downloadFile(urlString, dirName)
-		if err != nil {
-			return errors.New(fmt.Sprintf("error downloading file: %v", err))
-		}
-		log.Printf("INFO: Downloaded file %s, depth is %d, max depth is %d", urlString, currentDepth, maxDepth)
-		return nil
-	}
+	req.Filename = fileName // Set the filename
 
-	// Parse the response body as HTML and find links to continue crawling
-	links := findLinks(body)
-	for _, link := range links {
-		newUrlString := link
-		// Check if URL has already been visited
-		if visitedURLs[newUrlString] {
-			log.Printf("INFO: Skipping already visited URL: %s", newUrlString)
-			continue
-		}
-		err = Crawler(newUrlString, dirName, client, currentDepth+1)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
+	client := grab.NewClient()
+	resp := client.Do(req)
 
-func ConnectToURL(urlString string, client *http.Client) ([]byte, error) {
-	resp, err := client.Get(urlString)
-	if err != nil {
-		return nil, err
-	}
+	// Wait for the download to complete
+	<-resp.Done
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New(fmt.Sprintf("website responded with %v", resp.StatusCode))
-	}
-
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	return body, nil
-}
-
-func setupFileName(url string) string {
-	fileName := strings.Replace(url, "://", "_", -1)
-	fileName = strings.Replace(fileName, "/", "_", -1)
-	fileName = strings.Replace(fileName, ".", "_", -1)
-	return fileName + "_" + time.Now().Format("20060102150405.000")
-}
-
-func saveResponseBodyToFile(fileName string, body []byte) error {
-	file, err := os.Create(fileName)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = file.Write(body)
-	if err != nil {
-		return err
+	if resp.Err() != nil {
+		return resp.Err()
 	}
 
 	return nil
-}
-
-func findLinks(body []byte) []string {
-	links := make([]string, 0)
-
-	reader := bytes.NewReader(body)
-	tokenizer := html.NewTokenizer(reader)
-
-	for {
-		tokenType := tokenizer.Next()
-
-		switch tokenType {
-		case html.ErrorToken:
-			return links // End of document
-		case html.StartTagToken, html.SelfClosingTagToken:
-			token := tokenizer.Token()
-
-			if token.Data == "a" {
-				for _, attr := range token.Attr {
-					if attr.Key == "href" {
-						link := attr.Val
-						// Ensure the link is not empty and is a valid URL
-						newLink := buildValidURL(urlString, link)
-						if newLink != "" {
-							links = append(links, newLink)
-						}
-					}
-				}
-			}
-		}
-	}
 }
 
 func buildValidURL(hostname string, link string) string {
@@ -228,7 +180,7 @@ func buildValidURL(hostname string, link string) string {
 		return link
 	}
 
-	// otherwise join the hostname and the linl
+	// otherwise join the hostname and the link
 	u, err := url.Parse(hostname)
 	if err != nil {
 		return ""
@@ -238,33 +190,92 @@ func buildValidURL(hostname string, link string) string {
 	return u.String()
 }
 
-func shouldDownload(urlString string) bool {
-	// Define a list of file extensions you want to download
-	allowedExtensions := []string{".html", ".htm", ".js", ".css"}
-	for _, ext := range allowedExtensions {
-		if strings.HasSuffix(urlString, ext) {
+// Function to check if two URLs belong to the same domain
+func isSameDomain(checkURL string) bool {
+	u1, err1 := url.Parse(urlString)
+	u2, err2 := url.Parse(checkURL)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+
+	return u1.Hostname() == u2.Hostname()
+}
+
+// Load previously downloaded URLs from the state file
+func loadStateFromFile(stateFileName string) {
+	file, err := os.Open(stateFileName)
+	if err != nil {
+		log.Println("INFO: State file not found, starting from scratch")
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		urlString = scanner.Text()
+		//visitedURLs[urlString] = true
+	}
+
+	if err = scanner.Err(); err != nil {
+		log.Printf("ERROR: Failed to read state file: %v", err)
+	}
+}
+
+func updateStateFile(urlStr string) {
+	file, err := os.OpenFile(stateFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("ERROR: Failed to open state file %s for writing: %v", stateFileName, err)
+		return
+	}
+	defer file.Close()
+
+	_, err = file.WriteString(urlStr + "\n")
+	if err != nil {
+		log.Printf("ERROR: Failed to write to state file %s: %v", stateFileName, err)
+	}
+}
+
+func hasBeenVisited(urlStr string) bool {
+	_, ok := visitedURLs[urlStr]
+	log.Printf("ok %v for url %v", ok, urlStr)
+	return ok
+}
+
+func hasBeenDownloaded(urlStr string) bool {
+	if *stateFileExistsPtr {
+		log.Printf("check state")
+		return checkStateFile(urlStr)
+	}
+	log.Printf("there is no file ")
+	return false
+}
+
+func markAsDownloaded(urlStr string) {
+	visitedURLs[urlStr] = true
+	updateStateFile(urlStr)
+}
+
+func checkStateFile(urlStr string) bool {
+	file, err := os.Open(stateFileName)
+	if err != nil {
+		log.Printf("ERROR: Failed to open state file for reading: %v", err)
+		log.Printf("downloaded false1")
+		return false
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == urlStr {
+			log.Printf("downloaded true")
 			return true
 		}
 	}
 
+	if err = scanner.Err(); err != nil {
+		log.Printf("ERROR: Failed to read from state file: %v", err)
+	}
+	log.Printf("downloaded false2")
 	return false
-}
-
-func downloadFile(urlString, dirName string) error {
-	req, err := grab.NewRequest(dirName, urlString)
-	if err != nil {
-		return err
-	}
-
-	client := grab.NewClient()
-	resp := client.Do(req)
-
-	// Wait for the download to complete
-	<-resp.Done
-
-	if resp.Err() != nil {
-		return resp.Err()
-	}
-
-	return nil
 }
