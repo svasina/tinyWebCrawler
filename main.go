@@ -8,19 +8,20 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 const defaultDepth = 2
 
 var (
-	urlString string
-	maxDepth  int
+	urlString          string
+	maxDepth           int
+	visitedURLs        = make(map[string]bool)
+	visitedURLsLock    = sync.Mutex{}
+	stateFileExists    = false
+	stateFileExistsPtr = &stateFileExists
+	stateFileName      = "crawler_state.txt"
 )
-
-var visitedURLs = make(map[string]bool)
-var stateFileExists = false
-var stateFileExistsPtr = &stateFileExists
-var stateFileName = "crawler_state.txt"
 
 var dirName = func() string {
 	tmpName := setupDirNameFormat()

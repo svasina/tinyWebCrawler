@@ -12,14 +12,25 @@ import (
 func Crawl() {
 	c := colly.NewCollector(
 		colly.MaxDepth(maxDepth),
+		colly.Async(true),
+		//colly.Debugger(&debug.LogDebugger{}),
 	)
+
+	c.Limit(&colly.LimitRule{
+		Parallelism: 4,
+		DomainGlob:  "*",
+	})
 
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
 		newURL := BuildValidURL(urlString, link)
+		visitedURLsLock.Lock() // Lock the mutex before accessing the map
 		if link != "" && !visitedURLs[newURL] {
 			visitedURLs[newURL] = true
+			visitedURLsLock.Unlock() // Unlock the mutex after modifying the map
 			e.Request.Visit(newURL)
+		} else {
+			visitedURLsLock.Unlock()
 		}
 	})
 
@@ -41,6 +52,8 @@ func Crawl() {
 		log.Fatalf("INFO: Mission failed, check logs. Msg: %v", err)
 	}
 
+	// Wait for all asynchronous requests to finish
+	c.Wait()
 	log.Println("INFO: Hooray! Mission completed")
 	os.Exit(0)
 }
